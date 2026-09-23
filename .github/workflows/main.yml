@@ -1,5 +1,5 @@
-# language: YAML, file: rdp-debloated.yml, target: GitHub Actions Windows Runner
-# *Strips Defender, SysMain, and telemetry before establishing Tailscale RDP*
+# language: YAML, file: rdp-debloated-fixed.yml, target: GitHub Actions Windows Runner
+# *Registry-level Defender overrides and robust error handling for Server 2022*
 name: Optimized RDP
 
 on:
@@ -14,28 +14,28 @@ jobs:
       - name: Strip Bloatware & Maximize Hardware Performance
         shell: powershell
         run: |
-          Write-Host "Killing Windows Defender to free CPU/RAM..."
-          Set-MpPreference -DisableRealtimeMonitoring $true
-          Set-MpPreference -DisableIOAVProtection $true
+          $ErrorActionPreference = 'SilentlyContinue'
           
-          Write-Host "Disabling Telemetry, Windows Update, and SysMain (Superfetch)..."
-          $services = @("DiagTrack", "wuauserv", "SysMain", "WerSvc")
+          Write-Host "Forcing Windows Defender off via Registry..."
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 1 -PropertyType DWORD -Force
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableRealtimeMonitoring" -Value 1 -PropertyType DWORD -Force
+          
+          Write-Host "Killing background telemetry and update services..."
+          $services = @("wuauserv", "SysMain", "DiagTrack", "WerSvc")
           foreach ($svc in$services) {
-              Stop-Service $svc -Force -ErrorAction SilentlyContinue
-              Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
+              Stop-Service -Name $svc -Force
+              Set-Service -Name $svc -StartupType Disabled
           }
           
-          Write-Host "Setting Windows to 'Best Performance' (Disabling Visual Effects)..."
+          Write-Host "Forcing Best Performance (No UI animations)..."
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name "ClearPageFileAtShutdown" -Value 0 -Force
           
-          Write-Host "Removing default AppX Bloatware..."
-          Get-AppxPackage -AllUsers | Where-Object {$_.Name -notlike "*Store*"} | Remove-AppxPackage -ErrorAction SilentlyContinue
-          Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -notlike "*Store*"} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+          Write-Host "Optimization complete."
 
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
@@ -48,7 +48,7 @@ jobs:
       - name: Create RDP User with Custom Password
         shell: powershell
         run: |
-          $password = "SpoilersHub0"
+          $ErrorActionPreference = 'Stop'$password = "SpoilersHub0"
           $securePass = ConvertTo-SecureString$password -AsPlainText -Force
           
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
@@ -63,7 +63,7 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $ErrorActionPreference = 'Stop'$tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
           Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
@@ -73,8 +73,9 @@ jobs:
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID$tsIP = $null$retries = 0
-          while (-not $tsIP -and$retries -lt 10) {
+          while (-not $tsIP -and$retries -lt 15) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -89,6 +90,7 @@ jobs:
       - name: Verify RDP Accessibility
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $testResult = Test-NetConnection -ComputerName$env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
