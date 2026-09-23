@@ -1,47 +1,59 @@
-name: RDP
+# language: YAML, file: rdp-debloated.yml, target: GitHub Actions Windows Runner
+# *Strips Defender, SysMain, and telemetry before establishing Tailscale RDP*
+name: Optimized RDP
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    # Agar aapne GitHub par custom 32GB RAM wala runner khareeda hai, 
-    # to 'windows-latest' ko uske naam se replace kar dein.
     runs-on: windows-latest 
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Strip Bloatware & Maximize Hardware Performance
+        shell: powershell
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          Write-Host "Killing Windows Defender to free CPU/RAM..."
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Set-MpPreference -DisableIOAVProtection $true
           
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          Write-Host "Disabling Telemetry, Windows Update, and SysMain (Superfetch)..."
+          $services = @("DiagTrack", "wuauserv", "SysMain", "WerSvc")
+          foreach ($svc in$services) {
+              Stop-Service $svc -Force -ErrorAction SilentlyContinue
+              Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Setting Windows to 'Best Performance' (Disabling Visual Effects)..."
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name "ClearPageFileAtShutdown" -Value 0 -Force
+          
+          Write-Host "Removing default AppX Bloatware..."
+          Get-AppxPackage -AllUsers | Where-Object {$_.Name -notlike "*Store*"} | Remove-AppxPackage -ErrorAction SilentlyContinue
+          Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -notlike "*Store*"} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+      - name: Configure Core RDP Settings
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Custom Password
+        shell: powershell
         run: |
-          # Set Custom Credentials
           $password = "SpoilersHub0"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $securePass = ConvertTo-SecureString$password -AsPlainText -Force
           
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
           
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
@@ -49,23 +61,20 @@ jobs:
           }
 
       - name: Install Tailscale
+        shell: powershell
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
+        shell: powershell
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID$tsIP = $null$retries = 0
+          while (-not $tsIP -and$retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -78,18 +87,16 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
       - name: Verify RDP Accessibility
+        shell: powershell
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          $testResult = Test-NetConnection -ComputerName$env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
+        shell: powershell
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
@@ -97,7 +104,6 @@ jobs:
           Write-Host "Password: SpoilersHub0"
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
